@@ -42,11 +42,18 @@ from sheaf_admm.viz import (  # noqa: E402
 )
 
 # Default per-task ADMM counts for the prediction-evolution panels.
-DEFAULT_KS = {"maze": (1, 3, 5, 10, 30), "sudoku": (1, 3, 5, 10, 20), "mnist": (1, 3, 5, 10, 30)}
+DEFAULT_KS = {
+    "maze": (1, 3, 5, 10, 30),
+    "sudoku": (1, 3, 5, 10, 20),
+    "mnist": (1, 3, 5, 10, 30),
+    "picross": (1, 3, 5, 10, 20, 50),
+}
 
 
 def _first_batch(cfg: dict, task_name: str, data_dir: str, split: str):
-    loader = cfg["data"].get("loader", "puzzle" if task_name in ("maze", "sudoku") else "image")
+    loader = cfg["data"].get(
+        "loader", "puzzle" if task_name in ("maze", "sudoku", "picross") else "image"
+    )
     if loader == "puzzle":
         ds = PuzzleDataset(data_dir, split)
         for _set, b in ds.iter_test_batches(batch_size=8):
@@ -65,7 +72,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--checkpoint", required=True, help="path to checkpoint.pt")
     p.add_argument("--out-dir", required=True, help="directory for the artifact files")
-    p.add_argument("--task", default=None, help="override task (maze|sudoku|mnist)")
+    p.add_argument("--task", default=None, help="override task (maze|sudoku|mnist|picross)")
     p.add_argument("--data-dir", default=None, help="override dataset directory")
     p.add_argument("--split", default=None, help="dataset split (default: first val split)")
     p.add_argument("--params", choices=("ema", "raw"), default="ema", help="which weights to use")

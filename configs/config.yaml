@@ -4,7 +4,7 @@
 defaults:
   - _self_
 
-task: maze            # maze | mnist | sudoku  (selects the task hook)
+task: maze            # maze | mnist | sudoku | picross  (selects the task hook)
 model_type: sheaf     # sheaf | mpnn
 
 wandb:
@@ -42,7 +42,7 @@ data:
   dir: ???            # set per experiment
   train_split: train
   val_splits: [test]
-  loader: puzzle      # puzzle (maze/sudoku) | image (mnist)
+  loader: puzzle      # puzzle (maze/sudoku/picross) | image (mnist)
 
 # kwargs forwarded to the task hook (sheaf_admm.training.make_task)
 task_cfg: {}

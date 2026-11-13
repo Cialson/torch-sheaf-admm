@@ -33,10 +33,18 @@ class MPNNModel(nn.Module):
         elif c.encoder_arch == "mlp":
             enc_kwargs.update(hidden_dims=(c.enc_hidden_dim,), dropout_rate=c.dropout_rate)
         elif c.encoder_arch == "sudoku":
-            enc_kwargs.update(d_model=c.enc_d_model, num_blocks=c.enc_num_blocks)
+            enc_kwargs.update(
+                d_model=c.enc_d_model,
+                num_blocks=c.enc_num_blocks,
+                num_slots=c.num_slots,
+                num_cells=c.num_cells,
+                token_dim=c.slot_input_dim,
+            )
         self.encoder = create_encoder(c.encoder_arch, **enc_kwargs)
         self.init_hidden = Dense(c.d_v, c.d_v)
-        num_types = {"shared": 1, "spatial": c.num_directions, "slot": 9}[c.mpnn_edge_type_mode]
+        num_types = {"shared": 1, "spatial": c.num_directions, "slot": c.num_slots}[
+            c.mpnn_edge_type_mode
+        ]
         self.ggnn = DirectionalGGNN(
             c.d_v, c.mpnn_message_dim or c.d_e, num_types, c.mpnn_aggregation, context_dim=c.d_v
         )
@@ -62,6 +70,7 @@ class MPNNModel(nn.Module):
                     output_channels=c.num_classes,
                     norm_type=c.dec_norm_type,
                     comm_dim=c.d_v,
+                    num_slots=c.num_slots,
                 )
             else:
                 kwargs.update(
@@ -132,6 +141,8 @@ class MPNNModel(nn.Module):
             if cell_ids is not None
             else None
         )
+        if c.encoder_arch == "sudoku":
+            self.encoder.check_inputs(patches, cell_ids)
         n, b = patches.shape[:2]
         flat = patches.reshape(n * b, *patches.shape[2:])
         if c.encoder_arch == "sudoku":

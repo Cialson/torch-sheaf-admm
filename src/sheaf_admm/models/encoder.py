@@ -290,6 +290,13 @@ class MLPEncoder(_EncoderBase):
 
 
 class SudokuEncoder(_EncoderBase):
+    """Slot-based encoder (Sudoku, Picross): an agent is ``num_slots`` tokens, one per cell.
+
+    Tokens get a learned slot-position embedding and, when ``cell_ids`` are given, a learned
+    board-cell embedding (``num_cells`` entries); MLP-Mixer blocks mix them, and each token is
+    projected to its own ``comm_dim / num_slots`` block of the agent stalk.
+    """
+
     def __init__(
         self,
         d_model=128,
@@ -312,6 +319,9 @@ class SudokuEncoder(_EncoderBase):
         lora_init_style="legacy",
         num_directions=4,
         input_shape=None,
+        num_slots=9,
+        num_cells=81,
+        token_dim=10,
     ):
         super().__init__()
         self._set_common(
@@ -331,19 +341,26 @@ class SudokuEncoder(_EncoderBase):
             lora_init_style,
             num_directions,
         )
-        if comm_dim % 9:
-            raise ValueError("comm_dim must be divisible by 9")
-        self.cell_dim = comm_dim // 9
-        in_dim = input_shape[-1] if input_shape is not None else 10
+        if comm_dim % num_slots:
+            raise ValueError(f"comm_dim={comm_dim} must be divisible by num_slots={num_slots}")
+        self.num_slots, self.num_cells = num_slots, num_cells
+        self.cell_dim = comm_dim // num_slots
+        in_dim = input_shape[-1] if input_shape is not None else token_dim
         self.token_embed = Dense(in_dim, d_model)
         nn.init.normal_(self.token_embed.weight, std=1 / math.sqrt(d_model))
-        self.global_pos_embed = nn.Embedding(81, d_model)
+        self.global_pos_embed = nn.Embedding(num_cells, d_model)
         nn.init.normal_(self.global_pos_embed.weight, std=1 / math.sqrt(d_model))
-        self.pos_embed = nn.Parameter(torch.empty(1, 9, d_model))
+        self.pos_embed = nn.Parameter(torch.empty(1, num_slots, d_model))
         nn.init.normal_(self.pos_embed, std=1 / math.sqrt(d_model))
         self.blocks = nn.ModuleList(
             [
-                MLPMixerBlock(9, d_model, int(9 * mlp_ratio), int(d_model * mlp_ratio), mlp_type)
+                MLPMixerBlock(
+                    num_slots,
+                    d_model,
+                    int(num_slots * mlp_ratio),
+                    int(d_model * mlp_ratio),
+                    mlp_type,
+                )
                 for _ in range(num_blocks)
             ]
         )
@@ -352,6 +369,28 @@ class SudokuEncoder(_EncoderBase):
         self.cell_norm = RMSNorm(self.cell_dim)
         _heads(self, d_model, None, RMSNorm(d_model))
         self.embed_scale = math.sqrt(d_model / 2)
+
+    def check_inputs(self, patches: torch.Tensor, cell_ids: torch.Tensor | None) -> None:
+        """Fail early, with a config hint, when the task's slot layout does not match this
+        encoder (instead of a CUDA indexing assert or a silent mis-reshape downstream)."""
+        S, F_in, C = self.num_slots, self.token_embed.in_features, self.num_cells
+        if patches.ndim != 4 or tuple(patches.shape[2:]) != (S, F_in):
+            raise ValueError(
+                f"slot patches have shape {tuple(patches.shape)} ([agents, batch, slots, "
+                f"features]) but the model expects {S} slots of {F_in} features: set "
+                "model.num_slots and model.slot_input_dim to match the task"
+            )
+        if cell_ids is not None:
+            if tuple(cell_ids.shape) != (patches.shape[0], S):
+                raise ValueError(
+                    f"cell_ids have shape {tuple(cell_ids.shape)}, expected "
+                    f"{(patches.shape[0], S)}"
+                )
+            if int(cell_ids.max()) >= C:
+                raise ValueError(
+                    f"cell_ids go up to {int(cell_ids.max())} but model.num_cells={C}: set "
+                    "model.num_cells to the number of board cells"
+                )
 
     def forward(self, x, cell_ids=None, training=True):
         y = self.token_embed(x)

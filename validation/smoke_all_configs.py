@@ -31,6 +31,8 @@ EXPERIMENTS = (
     "maze_mpnn",
     "mnist_mpnn",
     "sudoku_mpnn",
+    "picross_sheaf",
+    "picross_mpnn",
 )
 
 
@@ -43,6 +45,12 @@ def synthetic_batch(task_name: str) -> dict:
             "height": 7,
             "width": 7,
         }
+    if task_name == "picross":
+        from sheaf_admm.data.picross import grid_clues, pack_clues
+
+        grids = (rng.random((2, 10, 10)) < 0.6).astype(np.int64)
+        inputs = np.stack([pack_clues(grid_clues(g), 10).reshape(-1) for g in grids])
+        return {"inputs": inputs, "labels": grids.reshape(2, -1), "height": 10, "width": 10}
     if task_name == "mnist":
         return {
             "images": rng.random((2, 9, 9, 1), dtype=np.float32),

@@ -36,7 +36,7 @@ def main() -> None:
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     cfg = OmegaConf.create(ckpt["config"])
     if cfg.data.loader != "puzzle":
-        raise SystemExit("only puzzle datasets (maze / sudoku / life) are supported")
+        raise SystemExit("only puzzle datasets (maze / sudoku / life / picross) are supported")
     task = make_task(cfg.task, **OmegaConf.to_container(cfg.task_cfg, resolve=True))
     model_cfg = model_config_from_dict(OmegaConf.to_container(cfg.model, resolve=True))
     model = build_model(model_cfg, cfg.model_type, seed=0)

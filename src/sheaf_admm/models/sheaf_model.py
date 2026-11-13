@@ -56,14 +56,20 @@ class SheafADMMModel(nn.Module):
         elif c.encoder_arch == "mlp":
             enc_kwargs.update(hidden_dims=(c.enc_hidden_dim,), dropout_rate=c.dropout_rate)
         elif c.encoder_arch == "sudoku":
-            enc_kwargs.update(d_model=c.enc_d_model, num_blocks=c.enc_num_blocks)
+            enc_kwargs.update(
+                d_model=c.enc_d_model,
+                num_blocks=c.enc_num_blocks,
+                num_slots=c.num_slots,
+                num_cells=c.num_cells,
+                token_dim=c.slot_input_dim,
+            )
         self.encoder = create_encoder(c.encoder_arch, **enc_kwargs)
         if c.rm_sharing == "directional":
             self.rm = DirectionalRestrictionMaps(c.d_v, c.d_e, c.rm_init, c.num_directions)
         elif c.rm_sharing == "global":
             self.rm = SharedRestrictionMap(c.d_v, c.d_e, c.rm_init)
         elif c.rm_sharing == "sudoku":
-            self.rm = SudokuRestrictionMaps(c.d_v, c.d_e, c.rm_init)
+            self.rm = SudokuRestrictionMaps(c.d_v, c.d_e, c.rm_init, c.num_slots)
         else:
             raise ValueError(f"unknown rm_sharing={c.rm_sharing!r}")
         self.rho_raw = nn.Parameter(torch.zeros(()), requires_grad=c.rho_learnable)
@@ -88,6 +94,7 @@ class SheafADMMModel(nn.Module):
                 output_channels=c.num_classes,
                 norm_type=c.dec_norm_type,
                 comm_dim=c.d_v,
+                num_slots=c.num_slots,
             )
         elif c.decoder_arch == "classification":
             dec_kwargs.update(
@@ -173,6 +180,8 @@ class SheafADMMModel(nn.Module):
 
     def _setup_admm(self, patches, edge_indices, node_positions, map_u, map_v, cell_ids, training):
         c = self.config
+        if c.encoder_arch == "sudoku":
+            self.encoder.check_inputs(patches, cell_ids)
         enc_out = self._encode(patches, cell_ids, training)
         geometry = self._build_geometry(enc_out, edge_indices, node_positions, map_u, map_v)
         rho = self._learned_scalar(self.rho_raw, c.rho_init)

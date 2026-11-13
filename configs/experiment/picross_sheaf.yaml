@@ -1,0 +1,51 @@
+# @package _global_
+# Sheaf-ADMM Picross (nonogram) 10x10, local task (not in the paper).
+# 20 line agents (10 rows, then 10 columns) on K(10,10), one edge per cell; the Sudoku slot
+# architecture with num_slots=10. Data: `python -m sheaf_admm.data.build_picross`.
+# Solver / optimizer settings are the paper's Sudoku ones (untuned for Picross).
+task: picross
+model_type: sheaf
+
+training:
+  lr: 1.7e-3
+  weight_decay: 1.0e-7
+  epochs: 5
+  K_train: 20
+  K_eval: 50
+  loss_window: 2
+  train_iters_dist: fixed
+  val_interval: 1
+
+data:
+  dir: datasets/picross_10x10
+  train_split: train
+  val_splits: [test_easy, test_hard]   # solved by line logic alone / needs search
+  loader: puzzle
+
+task_cfg:
+  clue_encoding: onehot   # 5 clue slots x 11 values = 55 features per agent slot
+
+model:
+  num_classes: 2
+  num_slots: 10           # cells per line agent
+  num_cells: 100          # board cells (global cell-position embedding)
+  slot_input_dim: 55      # = task_cfg clue encoding width (5 with clue_encoding: scalar)
+  d_v: 320                # 10 cells x 32-dim blocks
+  d_e: 32
+  encoder_arch: sudoku    # slot-based encoder (Mixer over the 10 cells of a line)
+  enc_d_model: 128
+  enc_num_blocks: 2
+  comm_norm_type: layernorm
+  objective_mode: non_negative      # closed-form x = max((rho(z-y)-q)/(D+rho), 0)
+  x_solver: diagonal_prox
+  z_solver: unrolled_cg
+  z_mode: prox
+  gamma: 2.0
+  cg_iters: 5
+  rm_sharing: sudoku                # one base map per slot = selector onto that cell's block
+  rm_init: soft_slice
+  rm_mode: fixed
+  num_directions: 10
+  rho_init: 0.25
+  decoder_arch: sudoku
+  dec_hidden_dims: [256]

@@ -47,13 +47,19 @@ uv run python -m scripts.visualize --checkpoint outputs/<date>/<time>/checkpoint
 uv run python -m sheaf_admm.data.build_life        # datasets/life_15px_1step (train, test, test_2x)
 uv run python scripts/train.py +experiment=life_sheaf
 uv run python scripts/eval_iters.py outputs/<date>/<time>/checkpoint.pt --iters 1 5 10 20 50 100 200
+
+# local Picross (nonogram) 10x10 task (see "Picross" below)
+uv run python scripts/show_picross.py --split test_easy --index 41   # data / agents / line logic
+uv run python scripts/train.py +experiment=picross_sheaf             # ~15 min/epoch, 6.2 GiB
+uv run python scripts/train.py +experiment=picross_mpnn              # ~3 min/epoch
 ```
 
 `scripts/eval_iters.py` re-evaluates a puzzle-task checkpoint (EMA weights by default,
 `--params live` otherwise) at several ADMM iteration / MPNN round counts without retraining.
 
 Experiments: `maze_sheaf`, `maze_mpnn`, `mnist_sheaf`, `mnist_mpnn`, `sudoku_sheaf`,
-`sudoku_sheaf_lora`, `sudoku_mpnn` (paper), plus the local `life_sheaf`, `life_mpnn`.
+`sudoku_sheaf_lora`, `sudoku_mpnn` (paper), plus the local `life_sheaf`, `life_mpnn`,
+`picross_sheaf`, `picross_mpnn`.
 Paper seeds: `training.seed=42|123|456`. W&B is off by default
 (`wandb.mode=online` to enable). Outputs (`checkpoint.pt`, `history.json`) go to Hydra's
 `outputs/<date>/<time>/`.
@@ -112,7 +118,7 @@ windowed loss**.
   intermediate checkpoints). Use `training.epochs=N` for a shorter run you can visualize.
 - `scripts/visualize.py` only supports Sheaf checkpoints (MPNN has no ADMM trajectory); compare
   MPNN runs through `history.json` metrics.
-- `task:` in a config is a key of the `make_task` registry (`maze | mnist | sudoku`), not a free
+- `task:` in a config is a key of the `make_task` registry (`maze | mnist | sudoku | picross`), not a free
   experiment name; a new grid task can reuse `task: maze` (see Game of Life).
 - Eval uses EMA weights. With the default `ema_decay: 0.999`, short runs (< ~3000 steps) report
   metrics of weights still dominated by the random init (780 steps: 0.999^780 ≈ 46 % init). Use a
@@ -123,6 +129,11 @@ windowed loss**.
   Check the `[init] ... params=` line of both runs.
 - `train.py` only samples `K ~ U[train_iters_min, K_train]` for Sheaf; MPNN always trains with a
   fixed `mpnn_train_rounds`.
+- The shipped `sudoku_mpnn` is *not* parameter-matched (~3.0M params vs ~543K for `sudoku_sheaf`);
+  `picross_mpnn` is (`d_v: 160`, ~613K vs ~597K for `picross_sheaf`).
+- Slot-based models (`encoder_arch: sudoku`, Sudoku and Picross) are sized by `model.num_slots`
+  (cells per agent), `num_cells` (board cells) and `slot_input_dim` (features per slot); defaults
+  are Sudoku's (9 / 81 / 10). A mismatch with the task raises at the first forward.
 
 ## Local results (RTX 4060 Laptop 8 GB, WSL2)
 

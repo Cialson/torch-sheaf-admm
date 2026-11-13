@@ -1,4 +1,4 @@
-"""Exercise MNIST and Sudoku data-loader, trainer and visualization CLIs.
+"""Exercise MNIST, Sudoku and Picross data-loader, trainer and visualization CLIs.
 
 Builds tiny synthetic on-disk datasets in a temporary directory. The labels are
 arbitrary; this checks operational wiring, not task accuracy. Run with
@@ -15,7 +15,9 @@ from pathlib import Path
 
 import numpy as np
 
+from sheaf_admm.data.build_picross import PicrossConfig, build_from_arrays
 from sheaf_admm.data.build_sudoku import SudokuConfig, _build_split_from_puzzles
+from sheaf_admm.data.picross import grid_clues, pack_clues
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -38,6 +40,15 @@ def _sudoku_data(path: Path) -> None:
     solution = (np.arange(81).reshape(9, 9) % 9 + 1).astype(np.uint8)
     for split in ("train", "test_hard"):
         _build_split_from_puzzles(split, [(empty, solution)], cfg, apply_augmentation=False)
+
+
+def _picross_data(path: Path) -> None:
+    """Random 10x10 boards through the real builder (keeps the unique ones, splits easy/hard)."""
+    rng = np.random.default_rng(13)
+    labels = (rng.random((200, 100)) < 0.6).astype(np.uint8)
+    inputs = np.stack([pack_clues(grid_clues(g.reshape(10, 10)), 10).reshape(-1) for g in labels])
+    cfg = PicrossConfig(output_dir=path, workers=1)
+    build_from_arrays(cfg, inputs[:100], labels[:100], inputs[100:], labels[100:])
 
 
 def _run(name: str, data_dir: Path, temp: Path, batch_size: int) -> None:
@@ -91,10 +102,13 @@ def main() -> None:
         temp = Path(temp_dir)
         mnist = temp / "mnist"
         sudoku = temp / "sudoku"
+        picross = temp / "picross"
         _mnist_data(mnist)
         _sudoku_data(sudoku)
+        _picross_data(picross)
         _run("mnist_sheaf", mnist, temp, batch_size=2)
         _run("sudoku_sheaf", sudoku, temp, batch_size=1)
+        _run("picross_sheaf", picross, temp, batch_size=4)
 
 
 if __name__ == "__main__":

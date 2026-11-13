@@ -23,7 +23,13 @@ def _load(name):
 
 
 def _inputs(cfg, task):
-    if task == "sudoku":
+    if task == "picross":
+        edges, map_u, map_v = V.build_picross_graph(cfg.num_slots)
+        patches = torch.zeros(2 * cfg.num_slots, 2, cfg.num_slots, cfg.slot_input_dim)
+        kwargs = dict(
+            map_u=map_u, map_v=map_v, cell_ids=V.build_picross_cell_indices(cfg.num_slots)
+        )
+    elif task == "sudoku":
         edges, map_u, map_v = V.build_sudoku_multigraph(9)
         patches = torch.zeros(27, 2, 9, cfg.num_classes)
         kwargs = dict(map_u=map_u, map_v=map_v, cell_ids=V.build_sudoku_cell_indices(9))
@@ -95,6 +101,8 @@ def test_direction_kernel_flax_xavier_scale():
         ("maze_mpnn", 182007),
         ("sudoku_sheaf", 543025),
         ("sudoku_sheaf_lora", 2029233),
+        ("picross_sheaf", 596791),
+        ("picross_mpnn", 613063),  # parameter-matched to picross_sheaf
     ],
 )
 def test_locked_parameter_budgets(name, expected):
@@ -129,6 +137,8 @@ def test_maze_compute_matched_mpnn_budget():
         "maze_mpnn",
         "mnist_mpnn",
         "sudoku_mpnn",
+        "picross_sheaf",
+        "picross_mpnn",
     ],
 )
 def test_all_shipped_configs_forward(name):

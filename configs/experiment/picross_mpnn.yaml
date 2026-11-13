@@ -1,0 +1,41 @@
+# @package _global_
+# Recurrent-MPNN Picross 10x10 baseline, parameter-matched to picross_sheaf
+# (~613K vs ~597K params; note that the shipped sudoku_mpnn is ~3.0M vs ~543K for sudoku_sheaf).
+task: picross
+model_type: mpnn
+
+training:
+  lr: 3.0e-4
+  weight_decay: 1.0e-7
+  epochs: 5
+  mpnn_train_rounds: 20
+  mpnn_eval_rounds: 50
+  val_interval: 1
+
+data:
+  dir: datasets/picross_10x10
+  train_split: train
+  val_splits: [test_easy, test_hard]
+  loader: puzzle
+
+task_cfg:
+  clue_encoding: onehot
+
+model:
+  num_classes: 2
+  num_slots: 10
+  num_cells: 100
+  slot_input_dim: 55
+  d_v: 160                # 10 cells x 16 (parameter matching, see header)
+  d_e: 32
+  encoder_arch: sudoku
+  enc_d_model: 128
+  enc_num_blocks: 2
+  comm_norm_type: layernorm
+  decoder_arch: sudoku
+  dec_hidden_dims: [256]
+  mpnn_message_dim: 32
+  mpnn_aggregation: max
+  mpnn_edge_type_mode: slot       # 10 shared-cell slots
+  num_directions: 10
+  mpnn_graph_readout: per_node

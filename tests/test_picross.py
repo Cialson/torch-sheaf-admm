@@ -1,4 +1,4 @@
-"""Picross: clues, packing, line solver, offline builder, line-agent views / graph, and the task."""
+"""Picross: clues, packing, line solver, builder, line-agent views / graph, task, and models."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from sheaf_admm.data import views as V
 from sheaf_admm.data.build_picross import PicrossConfig, build_from_arrays
 from sheaf_admm.data.loaders import PuzzleDataset
 from sheaf_admm.geometry import FixedGeometry, build_sudoku_restriction_maps
+from sheaf_admm.models import ModelConfig, model_config_from_dict
+from sheaf_admm.training import build_model
 from sheaf_admm.training.tasks import PicrossTask, make_task, picross_line_clues
 
 
@@ -364,3 +366,96 @@ def test_picross_task_on_built_dataset(tmp_path):
     grids = targets["labels_grid"].numpy()
     m = task.evaluate(_perfect_logits(grids), targets, {})
     assert m["solved"] == 1.0 and m["clue_ok"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Models with num_slots = n (phase 3)
+# ---------------------------------------------------------------------------
+
+_SMALL = dict(
+    num_classes=2, d_v=40, d_e=4, encoder_arch="sudoku", enc_d_model=16, enc_num_blocks=1,
+    decoder_arch="sudoku", dec_hidden_dims=(16,), num_slots=10, num_cells=100,
+    slot_input_dim=55, num_directions=10,
+)
+_SHEAF = dict(
+    objective_mode="non_negative", x_solver="diagonal_prox", z_solver="unrolled_cg",
+    z_mode="prox", gamma=2.0, cg_iters=3, rm_sharing="sudoku", rm_init="soft_slice",
+    comm_norm_type="layernorm",
+)
+_MODELS = {
+    "sheaf_fixed": ("sheaf", {**_SMALL, **_SHEAF, "rm_mode": "fixed"}),
+    "sheaf_lora": ("sheaf", {**_SMALL, **_SHEAF, "rm_mode": "context", "lora_rank": 2,
+                             "lora_init_style": "standard"}),
+    "mpnn": ("mpnn", {**_SMALL, "mpnn_edge_type_mode": "slot", "mpnn_message_dim": 4}),
+}
+
+
+def _run(model, model_type, fwd, k=3, window=2):
+    if model_type == "sheaf":
+        return model(fwd["patches"], fwd["edge_indices"], num_iters=k, loss_window=window,
+                     **fwd["model_kwargs"], training=True, compile_steps=False)[0]
+    return model(fwd["patches"], fwd["edge_indices"], num_rounds=k, **fwd["model_kwargs"],
+                 training=True, compile_steps=False)[0].unsqueeze(0)
+
+
+@pytest.mark.parametrize("name", sorted(_MODELS))
+def test_picross_models_forward_backward(name):
+    model_type, kw = _MODELS[name]
+    model = build_model(model_config_from_dict(kw), model_type, seed=0)
+    batch, _ = _batch(B=3)
+    task = PicrossTask()
+    fwd, targets, _ = task.prepare(batch)
+    logits = _run(model, model_type, fwd)
+    expected_w = 2 if model_type == "sheaf" else 1
+    assert logits.shape == (expected_w, 20, 3, 10, 2)
+    loss = task.loss(logits, targets)
+    loss.backward()
+    assert torch.isfinite(loss)
+    no_grad = [n for n, p in model.named_parameters() if p.requires_grad and p.grad is None]
+    # The MPNN reuses the Sheaf encoder, whose ADMM-objective `beta_raw` it never reads (same
+    # for the Sudoku MPNN); everything else must receive a finite gradient.
+    assert no_grad == (["encoder.objective_heads.beta_raw"] if model_type == "mpnn" else [])
+    assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+    metrics = task.evaluate(logits[-1].detach(), targets, {})
+    assert 0.0 <= metrics["cell_acc"] <= 1.0
+
+
+def test_picross_slot_maps_select_their_cell_block():
+    """soft_slice with 10 slots: map k is (nearly) the selector of stalk block k."""
+    model = build_model(model_config_from_dict(_MODELS["sheaf_fixed"][1]), "sheaf", seed=0)
+    R = model.rm()  # [10, d_e, d_v]
+    assert R.shape == (10, 4, 40)
+    for k in range(10):
+        block = R[k, :, 4 * k : 4 * (k + 1)]
+        torch.testing.assert_close(block, torch.eye(4), atol=0.05, rtol=0)
+        assert R[k].abs().sum() - block.abs().sum() < 0.05 * 36 * 4
+
+
+def test_picross_mpnn_has_one_edge_type_per_slot():
+    model = build_model(model_config_from_dict(_MODELS["mpnn"][1]), "mpnn", seed=0)
+    assert model.ggnn.cell.dir_kernel.shape[0] == 10  # one message kernel per slot
+
+
+@pytest.mark.parametrize(
+    "override, match",
+    [
+        ({"num_slots": 9, "d_v": 36, "num_directions": 9}, "num_slots"),  # Sudoku layout
+        ({"slot_input_dim": 5}, "slot_input_dim"),  # scalar clue width expected
+        ({"num_cells": 81}, "num_cells"),
+    ],
+)
+def test_picross_model_rejects_mismatched_slot_layout(override, match):
+    model = build_model(
+        model_config_from_dict({**_MODELS["sheaf_fixed"][1], **override}), "sheaf", seed=0
+    )
+    fwd, _, _ = PicrossTask().prepare(_batch(B=2)[0])
+    with pytest.raises(ValueError, match=match):
+        _run(model, "sheaf", fwd)
+
+
+def test_slot_config_validation():
+    with pytest.raises(ValueError, match="multiple of num_slots"):
+        ModelConfig(**{**_SMALL, "d_v": 45})
+    with pytest.raises(ValueError, match="num_directions == num_slots"):
+        ModelConfig(**{**_MODELS["sheaf_lora"][1], "num_directions": 9})
+    ModelConfig(d_v=10)  # non slot-based configs are not constrained

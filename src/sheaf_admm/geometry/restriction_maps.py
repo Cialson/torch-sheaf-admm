@@ -76,19 +76,27 @@ def make_rm_initializer(init_method: str, d_e: int, d_v: int) -> Initializer:
     return init
 
 
-def make_sudoku_rm_initializer(init_method: str, d_e: int, d_v: int) -> Initializer:
-    if init_method == "soft_slice" and 9 * d_e > d_v:
-        raise ValueError(f"soft_slice needs 9*d_e <= d_v (got 9*{d_e}={9 * d_e} > {d_v})")
+def make_sudoku_rm_initializer(
+    init_method: str, d_e: int, d_v: int, num_slots: int = 9
+) -> Initializer:
+    """Initializer for the ``num_slots`` per-slot maps ``[num_slots, d_e, d_v]``.
+
+    ``soft_slice`` makes map ``k`` (near) the selector of stalk block ``k``: on an edge through
+    slot ``k`` the agent exposes its ``k``-th cell block.
+    """
+    S = num_slots
+    if init_method == "soft_slice" and S * d_e > d_v:
+        raise ValueError(f"soft_slice needs {S}*d_e <= d_v (got {S}*{d_e}={S * d_e} > {d_v})")
 
     def init(_key, shape, dtype=torch.float32):
-        if shape != (9, d_e, d_v):
-            raise ValueError(f"Sudoku map shape must be {(9, d_e, d_v)}, got {shape}")
+        if shape != (S, d_e, d_v):
+            raise ValueError(f"slot map shape must be {(S, d_e, d_v)}, got {shape}")
         if init_method == "soft_slice":
             mats = 0.01 * torch.randn(shape, dtype=dtype)
-            for k in range(9):
+            for k in range(S):
                 mats[k, :, k * d_e : (k + 1) * d_e] += torch.eye(d_e, dtype=dtype)
             return mats
-        return torch.stack([_init_one(init_method, d_e, d_v, dtype) for _ in range(9)])
+        return torch.stack([_init_one(init_method, d_e, d_v, dtype) for _ in range(S)])
 
     return init
 
@@ -131,11 +139,20 @@ class SharedRestrictionMap(nn.Module):
 
 
 class SudokuRestrictionMaps(nn.Module):
-    def __init__(self, stalk_dim: int, edge_stalk_dim: int, init_method: str = "soft_slice"):
+    """One learned map per agent slot (Sudoku: 9 cells, Picross: n cells); an edge uses the
+    maps of the slots its shared cell occupies in its two agents (``map_u`` / ``map_v``)."""
+
+    def __init__(
+        self,
+        stalk_dim: int,
+        edge_stalk_dim: int,
+        init_method: str = "soft_slice",
+        num_slots: int = 9,
+    ):
         super().__init__()
         self.R_indices = nn.Parameter(
-            make_sudoku_rm_initializer(init_method, edge_stalk_dim, stalk_dim)(
-                None, (9, edge_stalk_dim, stalk_dim)
+            make_sudoku_rm_initializer(init_method, edge_stalk_dim, stalk_dim, num_slots)(
+                None, (num_slots, edge_stalk_dim, stalk_dim)
             )
         )
 

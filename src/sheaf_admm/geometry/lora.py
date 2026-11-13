@@ -182,16 +182,16 @@ def create_lora_geometry(
 
 def create_sudoku_lora_geometry(
     edge_indices: torch.Tensor,
-    map_u: torch.Tensor,  # [E] cell-slot 0-8
-    map_v: torch.Tensor,  # [E] cell-slot 0-8
+    map_u: torch.Tensor,  # [E] cell slot 0..num_slots-1
+    map_v: torch.Tensor,  # [E] cell slot 0..num_slots-1
     restriction_maps: torch.Tensor,
-    A: torch.Tensor,  # [N, B, 9, d_e, r]
-    B: torch.Tensor,  # [N, B, 9, d_v, r]
+    A: torch.Tensor,  # [N, B, num_slots, d_e, r]
+    B: torch.Tensor,  # [N, B, num_slots, d_v, r]
     lora_alpha: float,
     gate: torch.Tensor | None = None,
     edge_mask: torch.Tensor | None = None,
 ) -> LoRAGeometry:
-    """Sudoku LoRA geometry: select factors by shared-cell slot (replaces direction)."""
+    """Slot LoRA geometry (Sudoku, Picross): select factors by shared-cell slot."""
     A_u, A_v, B_u, B_v, g_u, g_v = _gather_edge_factors(edge_indices, A, B, gate, map_u, map_v)
     return LoRAGeometry(
         edge_indices=edge_indices,

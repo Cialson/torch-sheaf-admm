@@ -182,7 +182,8 @@ def build_from_arrays(
     for name, (x, y) in sources.items():
         y = (np.asarray(y).reshape(len(y), n * n) > 0).astype(np.uint8)
         x_canon = canonical_inputs(y, n)
-        mismatch = int((x_canon != np.asarray(x).reshape(len(x), x_canon.shape[1])).any(axis=1).sum())
+        x_src = np.asarray(x).reshape(len(x), x_canon.shape[1])
+        mismatch = int((x_canon != x_src).any(axis=1).sum())
         if mismatch:
             raise ValueError(f"{mismatch} {name} boards have clues inconsistent with their labels")
         clean[name] = (x_canon, y)

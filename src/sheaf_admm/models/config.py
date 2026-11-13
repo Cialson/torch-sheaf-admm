@@ -24,10 +24,16 @@ class ModelConfig:
     d_e: int = 32  # edge stalk
 
     # --- encoder ---
-    encoder_arch: str = "mlp_v2"  # "mlp_v2" (maze) | "mlp" (mnist) | "sudoku"
+    encoder_arch: str = "mlp_v2"  # "mlp_v2" (maze) | "mlp" (mnist) | "sudoku" (slot-based)
     enc_hidden_dim: int = 256  # mlp_v2 hidden width
     enc_d_model: int = 128  # sudoku token width
     enc_num_blocks: int = 2  # sudoku mixer blocks
+
+    # --- slot-based tasks (encoder/decoder_arch "sudoku", rm_sharing "sudoku", MPNN "slot") ---
+    # Each agent sees `num_slots` cells; its stalk is `num_slots` blocks of d_v / num_slots.
+    num_slots: int = 9  # cells per agent: Sudoku 9 (row/col/box), Picross n (row/col)
+    num_cells: int = 81  # board cells (size of the global cell-position embedding)
+    slot_input_dim: int = 10  # features per slot: Sudoku one-hot 10, Picross clue encoding
     comm_norm_type: str = "layernorm"
     dropout_rate: float = 0.0
 
@@ -51,14 +57,14 @@ class ModelConfig:
     gd_momentum: float = 0.9
 
     # --- restriction maps / geometry ---
-    rm_sharing: str = "directional"  # global | directional | sudoku
+    rm_sharing: str = "directional"  # global | directional | sudoku (one map per slot)
     rm_init: str = "orthonormal"  # orthonormal | default | identity | soft_slice (sudoku)
     rm_mode: str = "fixed"  # fixed | context (LoRA)
     lora_rank: int = 4
     lora_alpha: float = 1.0
     lora_use_gate: bool = False
     lora_init_style: str = "legacy"  # legacy (B=0) | standard (A=0)
-    num_directions: int = 4  # grid 4/8; sudoku LoRA uses 9
+    num_directions: int = 4  # grid 4/8; slot LoRA: must equal num_slots
 
     # --- ADMM penalty / step ---
     rho_init: float = 0.1
@@ -73,7 +79,7 @@ class ModelConfig:
     # --- recurrent-MPNN baseline (ignored by SheafADMMModel) ---
     mpnn_message_dim: int | None = None  # message width (defaults to d_e)
     mpnn_aggregation: str = "max"  # add | mean | symnorm | max
-    mpnn_edge_type_mode: str = "spatial"  # shared (1) | spatial (4/8) | slot (9, sudoku)
+    mpnn_edge_type_mode: str = "spatial"  # shared (1) | spatial (4/8) | slot (num_slots)
     mpnn_graph_readout: str = "per_node"  # per_node (maze/sudoku) | graph (MNIST)
 
     # --- decoder ---
@@ -83,6 +89,20 @@ class ModelConfig:
     dec_linear_head: bool = False  # classification linear head (MNIST)
     dec_readout_mode: str = "concat"  # classification: concat | x_only
     dec_norm_type: str = "rmsnorm"
+
+    def __post_init__(self):
+        slot_based = "sudoku" in (self.encoder_arch, self.decoder_arch, self.rm_sharing)
+        if slot_based and self.d_v % self.num_slots:
+            raise ValueError(
+                f"d_v={self.d_v} must be a multiple of num_slots={self.num_slots} "
+                "(the stalk holds one block per slot)"
+            )
+        slot_lora = self.rm_sharing == "sudoku" and self.rm_mode == "context"
+        if slot_lora and self.num_directions != self.num_slots:
+            raise ValueError(
+                f"slot LoRA needs num_directions == num_slots (got {self.num_directions} "
+                f"and {self.num_slots})"
+            )
 
 
 def model_config_from_dict(d: dict[str, Any]) -> ModelConfig:

@@ -41,11 +41,22 @@ class ConcatMLPDecoderV2(nn.Module):
 
 
 class SudokuDecoder(nn.Module):
-    def __init__(self, hidden_dims=(128,), output_channels=10, norm_type="rmsnorm", comm_dim=288):
+    """Slot-based decoder (Sudoku, Picross): the stalk is cut into ``num_slots`` blocks and
+    the same MLP predicts each slot's cell from its block."""
+
+    def __init__(
+        self,
+        hidden_dims=(128,),
+        output_channels=10,
+        norm_type="rmsnorm",
+        comm_dim=288,
+        num_slots=9,
+    ):
         super().__init__()
-        if comm_dim % 9:
-            raise ValueError("comm_dim must be divisible by 9")
-        widths = [comm_dim // 9, *hidden_dims]
+        if comm_dim % num_slots:
+            raise ValueError(f"comm_dim={comm_dim} must be divisible by num_slots={num_slots}")
+        self.num_slots = num_slots
+        widths = [comm_dim // num_slots, *hidden_dims]
         self.blocks = nn.ModuleList(
             [
                 MLPBlock(widths[i], widths[i + 1], norm_type=norm_type)
@@ -55,7 +66,7 @@ class SudokuDecoder(nn.Module):
         self.output_dense = Dense(widths[-1], output_channels)
 
     def forward(self, x, patches=None, training=True):
-        h = x.reshape(x.shape[0], 9, -1)
+        h = x.reshape(x.shape[0], self.num_slots, -1)
         for block in self.blocks:
             h = block(h)
         return self.output_dense(h)

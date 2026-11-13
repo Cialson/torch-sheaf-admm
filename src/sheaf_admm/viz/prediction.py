@@ -13,6 +13,7 @@ Per task:
 * **Sudoku** — the 9x9 board with given clues (black) and filled digits (blue),
   constraint-violating cells highlighted red.
 * **MNIST** — per-pixel argmax-class consensus as a discrete heatmap.
+* **Picross** — the board with its clues, wrong cells outlined in red.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from sheaf_admm.data.common import TOKEN_IDS
 from ._render import (
     render_maze_panel,
     render_mnist_panel,
+    render_picross_panel,
     render_sudoku_panel,
     save_figure,
 )
@@ -71,6 +73,15 @@ def _sudoku_predictions(model, params, fwd, ks, batch_index):
     for k in ks:
         logits = _final_logits(model, params, fwd, k)  # [N, B, 9, 10]
         recon = V.reassemble_sudoku_logits(logits.permute(1, 0, 2, 3))  # [B, 9, 9, 10]
+        preds.append(np.argmax(_numpy(recon[batch_index]), axis=-1))
+    return preds
+
+
+def _picross_predictions(model, params, fwd, ks, batch_index):
+    preds = []
+    for k in ks:
+        logits = _final_logits(model, params, fwd, k)  # [2n, B, n, 2]
+        recon = V.reassemble_picross_logits(logits.permute(1, 0, 2, 3))  # [B, n, n, 2]
         preds.append(np.argmax(_numpy(recon[batch_index]), axis=-1))
     return preds
 
@@ -144,13 +155,21 @@ def plot_prediction_evolution(
         for ax, k, pred in zip(axes, ks, preds, strict=True):
             render_sudoku_panel(ax, givens, pred)
             ax.set_title(f"k = {k}", fontsize=11)
+    elif task_name == "picross":
+        preds = _picross_predictions(model, params, fwd, ks, batch_index)
+        packed = _numpy(targets["clues"][batch_index])
+        clues = [tuple(int(v) for v in row if v) for row in packed]
+        label = _numpy(targets["labels_grid"][batch_index])
+        for ax, k, pred in zip(axes, ks, preds, strict=True):
+            render_picross_panel(ax, clues, pred, wrong=pred != label, clue_fontsize=5)
+            ax.set_title(f"k = {k}  ({int((pred != label).sum())} wrong)", fontsize=10)
     elif task_name == "mnist":
         preds = _mnist_predictions(model, params, task, fwd, ks, batch_index)
         for ax, k, (_kind, pred) in zip(axes, ks, preds, strict=True):
             render_mnist_panel(ax, pred, num_classes=task.num_classes)
             ax.set_title(f"k = {k}", fontsize=11)
     else:
-        raise ValueError(f"unknown task name {task_name!r} (maze|sudoku|mnist)")
+        raise ValueError(f"unknown task name {task_name!r} (maze|sudoku|mnist|picross)")
 
     if title:
         fig.suptitle(title, fontsize=12)
