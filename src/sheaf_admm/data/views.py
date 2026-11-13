@@ -18,6 +18,14 @@ Two task families share this module:
   shared-cell slots. Reassembly averages the three views that cover each cell
   (:func:`reassemble_sudoku_logits`).
 
+* **Picross (nonogram).** An ``n x n`` board is covered by ``2n`` line agents — ``n`` rows,
+  then ``n`` columns — each an ``n``-cell view (:func:`picross_slice_batch`). A row and a
+  column share exactly one cell, so the agent graph is the complete bipartite graph
+  ``K(n, n)`` (:func:`build_picross_graph`) with one edge per cell and the same per-edge
+  shared-cell slots as Sudoku. An agent's input is its clue, broadcast over its ``n`` slots
+  (:func:`picross_patches`). Reassembly averages the row and column views
+  (:func:`reassemble_picross_logits`).
+
 Tensor conventions: images are ``[B, H, W, C]``, agent patches are
 ``[N, B, ph, pw, C]``, node states are ``[N, B, d_v]``, edges are ``[E, 2]``.
 """
@@ -355,6 +363,79 @@ def sudoku_num_nodes(grid_size: int = 9) -> int:
 def sudoku_node_positions(num_nodes: int) -> torch.Tensor:
     ids = torch.arange(num_nodes)
     return torch.stack([ids // 9, ids % 9], dim=1).float()
+
+
+# =============================================================================
+# Picross views: 2n line agents on K(n, n), one edge per cell
+# =============================================================================
+#
+# Agent ids: rows are 0..n-1 (agent i = row i), columns are n..2n-1 (agent n+j = column j).
+# Slot k of an agent is its k-th cell along the line (left to right, top to bottom).
+
+
+def picross_num_nodes(n: int) -> int:
+    return 2 * n
+
+
+def picross_slice_batch(batch_grids: torch.Tensor) -> torch.Tensor:
+    """``[B, n, n, C]`` -> ``[B, 2n, n, C]``: the rows, then the columns (as rows)."""
+    grids = torch.as_tensor(batch_grids)
+    if grids.ndim != 4 or grids.shape[1] != grids.shape[2]:
+        raise ValueError(f"expected square grids of shape (B,n,n,C); got {tuple(grids.shape)}")
+    return torch.cat([grids, grids.transpose(1, 2)], dim=1)
+
+
+def reassemble_picross_logits(batch_logits: torch.Tensor) -> torch.Tensor:
+    """``[B, 2n, n, C]`` -> ``[B, n, n, C]``: mean of the row and column views of each cell."""
+    logits = torch.as_tensor(batch_logits)
+    if logits.ndim != 4 or logits.shape[1] != 2 * logits.shape[2]:
+        raise ValueError(f"expected logits of shape (B,2n,n,C); got {tuple(logits.shape)}")
+    n = logits.shape[2]
+    return (logits[:, :n] + logits[:, n:].transpose(1, 2)) / 2.0
+
+
+def build_picross_cell_indices(n: int) -> torch.Tensor:
+    """``[2n, n]`` global cell id (``row * n + col``) of each agent slot."""
+    ids = torch.arange(n * n).reshape(1, n, n, 1)
+    return picross_slice_batch(ids)[0, :, :, 0].long()
+
+
+def build_picross_graph(n: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Edges ``[n*n, 2]`` and shared-cell slots ``map_u``, ``map_v`` ``[n*n]``.
+
+    Edge ``e = i * n + j`` joins row agent ``i`` and column agent ``n + j`` through cell
+    ``(i, j)``, which is slot ``j`` of the row and slot ``i`` of the column.
+    """
+    i, j = torch.meshgrid(torch.arange(n), torch.arange(n), indexing="ij")
+    i, j = i.reshape(-1), j.reshape(-1)
+    edges = torch.stack([i, n + j], dim=1).long()
+    return edges, j.clone().long(), i.clone().long()
+
+
+def unpack_picross_inputs(inputs: torch.Tensor, n: int) -> torch.Tensor:
+    """Packed clues ``[B, 2n * L]`` (or already ``[B, 2n, L]``) -> ``[B, 2n, L]`` long,
+    ``L = ceil(n / 2)``; same line order as the agents (rows, then columns)."""
+    x = torch.as_tensor(inputs).long()
+    slots = (n + 1) // 2
+    return x.reshape(x.shape[0], 2 * n, slots)
+
+
+def picross_patches(inputs: torch.Tensor, n: int, encoding: str = "onehot") -> torch.Tensor:
+    """Per-agent inputs ``[2n, B, n, F]``: each agent's clue, identical on its ``n`` slots.
+
+    ``encoding="onehot"`` gives ``F = L * (n + 1)`` (one-hot of each of the ``L`` right-aligned
+    clue slots, value 0 = padding); ``"scalar"`` gives ``F = L`` (clue values divided by ``n``).
+    The slot (cell position) is left to the encoder's positional embeddings.
+    """
+    clues = unpack_picross_inputs(inputs, n)  # [B, 2n, L]
+    if encoding == "onehot":
+        feats = F.one_hot(clues, n + 1).float().flatten(2)
+    elif encoding == "scalar":
+        feats = clues.float() / n
+    else:
+        raise ValueError(f"unknown clue encoding {encoding!r} (onehot | scalar)")
+    b, agents, f = feats.shape
+    return feats.permute(1, 0, 2)[:, :, None, :].expand(agents, b, n, f).contiguous()
 
 
 # =============================================================================

@@ -1,4 +1,4 @@
-"""Picross primitives (clues, packing, line solver, solution counting) and the offline builder."""
+"""Picross: clues, packing, line solver, offline builder, line-agent views / graph, and the task."""
 
 from __future__ import annotations
 
@@ -7,10 +7,14 @@ from math import comb
 
 import numpy as np
 import pytest
+import torch
 
 from sheaf_admm.data import picross as P
+from sheaf_admm.data import views as V
 from sheaf_admm.data.build_picross import PicrossConfig, build_from_arrays
 from sheaf_admm.data.loaders import PuzzleDataset
+from sheaf_admm.geometry import FixedGeometry, build_sudoku_restriction_maps
+from sheaf_admm.training.tasks import PicrossTask, make_task, picross_line_clues
 
 
 def _brute_force_placements(clue, n):
@@ -146,3 +150,217 @@ def test_build_rejects_inconsistent_source(tmp_path):
     x[0, 4] = 3  # claims a run of 3 on an empty row
     with pytest.raises(ValueError, match="inconsistent"):
         build_from_arrays(PicrossConfig(output_dir=tmp_path, workers=1), x, y, x[1:], y[1:])
+
+
+# ---------------------------------------------------------------------------
+# Views and graph (sheaf_admm.data.views)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("n", [4, 10])
+def test_picross_graph_is_complete_bipartite_with_one_edge_per_cell(n):
+    edges, map_u, map_v = V.build_picross_graph(n)
+    assert edges.shape == (n * n, 2) and map_u.shape == map_v.shape == (n * n,)
+    assert V.picross_num_nodes(n) == 2 * n
+    assert bool((edges[:, 0] < n).all() and (edges[:, 1] >= n).all())  # row -> column
+    pairs = {(int(u), int(v)) for u, v in edges}
+    assert pairs == {(i, n + j) for i in range(n) for j in range(n)}
+    assert int(map_u.max()) == int(map_v.max()) == n - 1
+
+
+@pytest.mark.parametrize("n", [4, 10])
+def test_picross_edge_slots_point_at_the_shared_cell(n):
+    """Slot ``map_u`` of the row and slot ``map_v`` of the column are the same cell, and
+    edge ``e`` is cell ``e``; every cell is covered by exactly two agents."""
+    edges, map_u, map_v = V.build_picross_graph(n)
+    cell_ids = V.build_picross_cell_indices(n)
+    assert cell_ids.shape == (2 * n, n)
+    via_u = cell_ids[edges[:, 0], map_u]
+    via_v = cell_ids[edges[:, 1], map_v]
+    torch.testing.assert_close(via_u, via_v)
+    torch.testing.assert_close(via_u, torch.arange(n * n))
+    np.testing.assert_array_equal(np.bincount(cell_ids.reshape(-1), minlength=n * n), 2)
+
+
+def test_picross_slice_reassemble_roundtrip():
+    n, B, C = 6, 3, 4
+    grid = torch.randn(B, n, n, C)
+    views = V.picross_slice_batch(grid)
+    assert views.shape == (B, 2 * n, n, C)
+    # Slicing is a gather of the flat grid by the cell ids.
+    cell_ids = V.build_picross_cell_indices(n)
+    torch.testing.assert_close(views, grid.reshape(B, n * n, C)[:, cell_ids])
+    torch.testing.assert_close(V.reassemble_picross_logits(views), grid)
+
+
+def test_picross_reassemble_averages_row_and_column_views():
+    n = 3
+    views = torch.zeros(1, 2 * n, n, 1)
+    views[0, 1, 2, 0] = 4.0  # row 1, slot 2 -> cell (1, 2)
+    views[0, n + 2, 1, 0] = 2.0  # column 2, slot 1 -> same cell
+    recon = V.reassemble_picross_logits(views)
+    assert recon[0, 1, 2, 0] == 3.0 and recon.sum() == 3.0
+
+
+def test_picross_patches_carry_each_agent_clue():
+    n = 10
+    rng = np.random.default_rng(4)
+    grids = (rng.random((2, n, n)) < 0.6).astype(np.uint8)
+    packed = np.stack([P.pack_clues(P.grid_clues(g), n).reshape(-1) for g in grids])  # disk format
+    L = P.clue_slots(n)
+
+    onehot = V.picross_patches(torch.as_tensor(packed), n)
+    assert onehot.shape == (2 * n, 2, n, L * (n + 1))
+    torch.testing.assert_close(onehot, onehot[:, :, :1].expand_as(onehot))  # same on all slots
+    decoded = onehot[:, :, 0].reshape(2 * n, 2, L, n + 1).argmax(-1)  # [2n, B, L]
+    for b, g in enumerate(grids):
+        clues = P.grid_clues(g)
+        for agent in range(2 * n):  # rows then columns, as in the graph
+            got = tuple(int(v) for v in decoded[agent, b] if v)
+            assert got == clues[agent]
+
+    scalar = V.picross_patches(torch.as_tensor(packed), n, encoding="scalar")
+    assert scalar.shape == (2 * n, 2, n, L)
+    torch.testing.assert_close(scalar[:, :, 0] * n, decoded.float())
+    with pytest.raises(ValueError):
+        V.picross_patches(torch.as_tensor(packed), n, encoding="bogus")
+
+
+def test_picross_consistent_board_is_a_global_section():
+    """With slot-selector restriction maps (the Sudoku ``soft_slice`` init without noise), the
+    per-agent views of one board have zero sheaf energy; corrupting one agent only breaks the
+    edges incident to it. This is the wiring the Sheaf model relies on."""
+    n, B, d_e = 5, 2, 3
+    d_v = n * d_e
+    selectors = torch.zeros(n, d_e, d_v)
+    for k in range(n):
+        selectors[k, :, k * d_e : (k + 1) * d_e] = torch.eye(d_e)
+    edges, map_u, map_v = V.build_picross_graph(n)
+    geom = FixedGeometry(edges, build_sudoku_restriction_maps(selectors, map_u, map_v))
+
+    cells = torch.randn(B, n, n, d_e)
+    z = V.picross_slice_batch(cells).permute(1, 0, 2, 3).reshape(2 * n, B, d_v)
+    assert geom.energy(z) < 1e-10
+    assert geom.laplacian_apply(z).abs().max() < 1e-6
+
+    z_bad = z.clone()
+    z_bad[n + 2] += 1.0  # corrupt column agent 2
+    res = geom.edge_residuals(z_bad).abs().amax(dim=(1, 2))  # [E]
+    touched = edges[:, 1] == n + 2
+    assert bool((res[touched] > 0.5).all()) and bool((res[~touched] < 1e-6).all())
+
+
+def test_propagate_round_by_round_reaches_the_same_fixed_point():
+    rng = np.random.default_rng(5)
+    n = 10
+    grid = (rng.random((n, n)) < 0.6).astype(np.uint8)
+    cands = [P.line_placements(c, n) for c in P.grid_clues(grid)]
+    empty = np.full((n, n), P.UNKNOWN, dtype=np.int8)
+    full = P.propagate(empty.copy(), [c.copy() for c in cands], parallel=True)
+
+    state, cs, steps = empty.copy(), [c.copy() for c in cands], 0
+    while True:
+        state, cs, r = P.propagate(state, cs, parallel=True, max_rounds=1)
+        if r == 0:
+            break
+        assert r == 1
+        steps += 1
+    np.testing.assert_array_equal(state, full[0])
+    assert steps == full[2]
+
+
+# ---------------------------------------------------------------------------
+# Task: prepare / loss / metrics (sheaf_admm.training.tasks.PicrossTask)
+# ---------------------------------------------------------------------------
+
+
+def _batch(n=10, B=4, seed=6):
+    rng = np.random.default_rng(seed)
+    grids = (rng.random((B, n, n)) < 0.6).astype(np.uint8)
+    inputs = np.stack([P.pack_clues(P.grid_clues(g), n).reshape(-1) for g in grids])
+    return {"inputs": inputs, "labels": grids.reshape(B, -1), "height": n, "width": n}, grids
+
+
+def _perfect_logits(grids, scale=10.0):
+    """Per-agent logits ``[2n, B, n, 2]`` that put the right class on every slot."""
+    views = V.picross_slice_batch(torch.as_tensor(grids, dtype=torch.long)[..., None])[..., 0]
+    return (torch.nn.functional.one_hot(views, 2).float() * 2 - 1).permute(1, 0, 2, 3) * scale
+
+
+@pytest.mark.parametrize("n", [1, 2, 5, 10])
+def test_picross_line_clues_matches_numpy_reference(n):
+    rng = np.random.default_rng(n)
+    lines = (rng.random((200, n)) < 0.5).astype(np.uint8)
+    lines[0], lines[1] = 0, 1  # empty and full lines
+    got = picross_line_clues(torch.as_tensor(lines)).numpy()
+    want = np.stack([P.pack_clues([P.line_clue(x)] * (2 * n), n)[0] for x in lines])
+    np.testing.assert_array_equal(got, want)
+
+
+def test_picross_task_prepare_shapes_and_targets():
+    batch, grids = _batch()
+    n, B = 10, 4
+    task = make_task("picross")
+    fwd, targets, aux = task.prepare(batch)
+    assert fwd["patches"].shape == (2 * n, B, n, 5 * 11)
+    assert fwd["edge_indices"].shape == (n * n, 2)
+    assert set(fwd["model_kwargs"]) == {"map_u", "map_v", "cell_ids"}
+    assert targets["slice_labels"].shape == (2 * n, B, n)
+    g = torch.as_tensor(grids).long()
+    torch.testing.assert_close(targets["slice_labels"][3, 1], g[1, 3])  # row agent 3
+    torch.testing.assert_close(targets["slice_labels"][n + 6, 1], g[1, :, 6])  # column agent 6
+    assert targets["clues"].shape == (B, 2 * n, 5)
+    assert make_task("picross", clue_encoding="scalar").prepare(batch)[0]["patches"].shape[-1] == 5
+
+
+def test_picross_task_loss():
+    batch, grids = _batch()
+    task = PicrossTask()
+    _, targets, _ = task.prepare(batch)
+    window = _perfect_logits(grids).unsqueeze(0).expand(2, -1, -1, -1, -1)  # [W=2, 2n, B, n, 2]
+    assert task.loss(window, targets) < 1e-6
+    uniform = torch.zeros_like(window)
+    torch.testing.assert_close(task.loss(uniform, targets), torch.tensor(np.log(2.0)).float())
+
+
+def test_picross_task_metrics():
+    batch, grids = _batch()
+    n, B = 10, 4
+    task = PicrossTask()
+    _, targets, _ = task.prepare(batch)
+
+    logits = _perfect_logits(grids)
+    m = task.evaluate(logits, targets, {})
+    assert m == {"cell_acc": 1.0, "solved": 1.0, "line_ok": 1.0, "clue_ok": 1.0, "view_agree": 1.0}
+
+    # Flip cell (2, 7) of board 0 in both views: one wrong cell breaks its row and its column.
+    both = logits.clone()
+    both[2, 0, 7] *= -1
+    both[n + 7, 0, 2] *= -1
+    m = task.evaluate(both, targets, {})
+    assert m["cell_acc"] == pytest.approx(1 - 1 / (B * n * n))
+    assert m["solved"] == m["clue_ok"] == pytest.approx(1 - 1 / B)
+    assert m["line_ok"] == pytest.approx(1 - 2 / (B * 2 * n))
+    assert m["view_agree"] == 1.0
+
+    # Only the row view disagrees, but more confidently: the averaged cell is wrong and the two
+    # views no longer agree on it.
+    one = logits.clone()
+    one[2, 0, 7] *= -3
+    m = task.evaluate(one, targets, {})
+    assert m["cell_acc"] == pytest.approx(1 - 1 / (B * n * n))
+    assert m["view_agree"] == pytest.approx(1 - 1 / (B * n * n))
+
+
+def test_picross_task_on_built_dataset(tmp_path):
+    """Batches straight from the puzzle loader go through prepare / evaluate."""
+    n = 8
+    rng = np.random.default_rng(7)
+    y = (rng.random((120, n * n)) < 0.55).astype(np.uint8)
+    x = np.stack([P.pack_clues(P.grid_clues(g.reshape(n, n)), n).reshape(-1) for g in y])
+    build_from_arrays(PicrossConfig(size=n, output_dir=tmp_path, workers=1), x, y, x[:0], y[:0])
+    _, batch = next(PuzzleDataset(tmp_path, "train").iter_test_batches(16))
+    task = PicrossTask()
+    fwd, targets, _ = task.prepare(batch)
+    grids = targets["labels_grid"].numpy()
+    m = task.evaluate(_perfect_logits(grids), targets, {})
+    assert m["solved"] == 1.0 and m["clue_ok"] == 1.0

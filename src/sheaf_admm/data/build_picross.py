@@ -104,6 +104,8 @@ def _load_npz(path: Path) -> np.ndarray:
 def canonical_inputs(labels: np.ndarray, n: int) -> np.ndarray:
     """Packed clues ``[M, 2n * ceil(n/2)]`` uint8 recomputed from 0/1 solutions ``[M, n*n]``."""
     grids = labels.reshape(-1, n, n)
+    if len(grids) == 0:
+        return np.zeros((0, 2 * n * clue_slots(n)), dtype=np.uint8)
     return np.stack([pack_clues(grid_clues(g), n).reshape(-1) for g in grids])
 
 
@@ -180,7 +182,7 @@ def build_from_arrays(
     for name, (x, y) in sources.items():
         y = (np.asarray(y).reshape(len(y), n * n) > 0).astype(np.uint8)
         x_canon = canonical_inputs(y, n)
-        mismatch = int((x_canon != np.asarray(x).reshape(len(x), -1)).any(axis=1).sum())
+        mismatch = int((x_canon != np.asarray(x).reshape(len(x), x_canon.shape[1])).any(axis=1).sum())
         if mismatch:
             raise ValueError(f"{mismatch} {name} boards have clues inconsistent with their labels")
         clean[name] = (x_canon, y)

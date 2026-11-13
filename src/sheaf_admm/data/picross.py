@@ -125,13 +125,19 @@ def _deduce(line: np.ndarray, cands: np.ndarray) -> tuple[np.ndarray, np.ndarray
 
 
 def propagate(
-    state: np.ndarray, cands: list[np.ndarray], *, parallel: bool = False
+    state: np.ndarray,
+    cands: list[np.ndarray],
+    *,
+    parallel: bool = False,
+    max_rounds: int | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], int] | None:
     """Line-logic fixed point. ``state`` is ``[n, n]`` int8 in ``{-1, 0, 1}`` and is modified.
 
     Returns ``(state, cands, rounds)`` where ``rounds`` counts the sweeps that fixed at least one
     cell, or ``None`` on a contradiction. ``parallel=True`` makes every line deduce from the same
     snapshot (synchronous rounds); otherwise lines are swept in order and see earlier updates.
+    ``max_rounds`` stops early (to record the intermediate states, call it with ``1`` until it
+    reports 0 rounds).
     """
     n = state.shape[0]
     rounds = 0
@@ -168,6 +174,8 @@ def propagate(
         if not changed:
             return state, cands, rounds
         rounds += 1
+        if max_rounds is not None and rounds >= max_rounds:
+            return state, cands, rounds
 
 
 @dataclass(frozen=True)

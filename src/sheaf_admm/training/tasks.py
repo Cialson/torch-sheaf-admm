@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import functools
+import math
+
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -145,8 +149,101 @@ class SudokuTask:
         }
 
 
+def picross_line_clues(lines: torch.Tensor) -> torch.Tensor:
+    """Packed clues of 0/1 lines: ``[..., n]`` -> ``[..., ceil(n/2)]`` long, run lengths
+    right-aligned and left-padded with 0 (the dataset input layout, see ``data.picross``)."""
+    x = lines.long()
+    n = x.shape[-1]
+    slots = (n + 1) // 2  # a line of n cells has at most ceil(n/2) runs
+    prev = F.pad(x[..., :-1], (1, 0))
+    starts = x * (1 - prev)  # 1 where a run begins
+    num_runs = starts.sum(-1, keepdim=True)  # [..., 1]
+    run_idx = (starts.cumsum(-1) - 1).clamp_min(0)  # run each filled cell belongs to
+    lengths = torch.zeros(*x.shape[:-1], slots, dtype=torch.long, device=x.device)
+    lengths = lengths.scatter_add(-1, run_idx, x)  # [..., slots], left-aligned
+    shift = slots - num_runs  # right-align: run r goes to slot shift + r
+    src = torch.arange(slots, device=x.device) - shift  # [..., slots]
+    packed = lengths.gather(-1, src.clamp_min(0))
+    return torch.where(src >= 0, packed, torch.zeros_like(packed))
+
+
+class PicrossTask:
+    """Nonogram: ``2n`` line agents (rows, then columns) on ``K(n, n)``, see ``data.views``.
+
+    Batches come from ``build_picross``: ``inputs`` ``[B, n*n]`` packed clues, ``labels``
+    ``[B, n*n]`` the 0/1 solution. The model predicts 2 classes per agent slot; the loss is the
+    cross-entropy of every agent's ``n`` slots (each cell is supervised in its row and its column
+    view), as for Sudoku.
+    """
+
+    name = "picross"
+    num_classes = 2
+
+    def __init__(self, *, clue_encoding: str = "onehot"):
+        self.clue_encoding = clue_encoding
+
+    @staticmethod
+    @functools.cache
+    def _graph(n: int):
+        edges, map_u, map_v = V.build_picross_graph(n)
+        return edges, map_u, map_v, V.build_picross_cell_indices(n)
+
+    def prepare(self, batch):
+        inputs = torch.as_tensor(np.asarray(batch["inputs"]), dtype=torch.long)
+        labels = torch.as_tensor(np.asarray(batch["labels"]), dtype=torch.long)
+        B = inputs.shape[0]
+        n = int(batch.get("height") or round(math.sqrt(labels.shape[1])))
+        edges, map_u, map_v, cell_ids = self._graph(n)
+        grid = labels.reshape(B, n, n)
+        fwd = {
+            "patches": V.picross_patches(inputs, n, self.clue_encoding),  # [2n, B, n, F]
+            "edge_indices": edges,
+            "model_kwargs": {"map_u": map_u, "map_v": map_v, "cell_ids": cell_ids},
+        }
+        targets = {
+            "slice_labels": V.picross_slice_batch(grid[..., None])[..., 0].permute(1, 0, 2),
+            "labels_grid": grid,
+            "clues": V.unpack_picross_inputs(inputs, n),  # [B, 2n, L]
+        }
+        return fwd, targets, {}
+
+    def loss(self, logits_window, targets):
+        labels = targets["slice_labels"]  # [2n, B, n]
+        return _ce(logits_window, labels.unsqueeze(0).expand(logits_window.shape[:-1])).mean()
+
+    def evaluate(self, logits_final, targets, aux):
+        """``logits_final`` ``[2n, B, n, 2]``. Metrics:
+
+        * ``cell_acc``: cells right, after averaging the row and column views of each cell;
+        * ``solved``: whole board right;
+        * ``line_ok``: fraction of the ``2n`` line clues the predicted board satisfies;
+        * ``clue_ok``: boards satisfying every clue (equals ``solved`` when solutions are unique,
+          as in ``build_picross``; differs on datasets that keep ambiguous boards);
+        * ``view_agree``: cells whose row view and column view predict the same value (how far
+          the agents reached a consensus, independently of being right).
+        """
+        views = logits_final.permute(1, 0, 2, 3)  # [B, 2n, n, 2]
+        n = views.shape[2]
+        pred = V.reassemble_picross_logits(views).argmax(-1)  # [B, n, n]
+        labels = targets["labels_grid"]
+        line_ok = (
+            picross_line_clues(V.picross_slice_batch(pred[..., None])[..., 0]) == targets["clues"]
+        ).all(-1)  # [B, 2n]
+        view_pred = views.argmax(-1)
+        return {
+            "cell_acc": (pred == labels).float().mean().item(),
+            "solved": (pred == labels).all(dim=(1, 2)).float().mean().item(),
+            "line_ok": line_ok.float().mean().item(),
+            "clue_ok": line_ok.all(-1).float().mean().item(),
+            "view_agree": (view_pred[:, :n] == view_pred[:, n:].transpose(1, 2))
+            .float()
+            .mean()
+            .item(),
+        }
+
+
 def make_task(name: str, **kwargs):
-    tasks = {"maze": MazeTask, "mnist": MNISTTask, "sudoku": SudokuTask}
+    tasks = {"maze": MazeTask, "mnist": MNISTTask, "sudoku": SudokuTask, "picross": PicrossTask}
     if name not in tasks:
         raise KeyError(f"unknown task {name!r}; available: {sorted(tasks)}")
     return tasks[name](**kwargs)
