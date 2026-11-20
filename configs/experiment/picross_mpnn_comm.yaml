@@ -1,0 +1,43 @@
+# @package _global_
+# Recurrent-MPNN Picross 10x10 baseline, communication-matched to picross_sheaf: same per-agent
+# state as the Sheaf stalk (d_v 320 = 10 cells x 32) and messages of the Sheaf edge-stalk size
+# (32), hence more parameters (~1.45M vs ~597K). The paper's "comm-matched" MPNN (Maze: d_v 10,
+# 49K vs 182K). Same lr as picross_sheaf.
+task: picross
+model_type: mpnn
+
+training:
+  lr: 1.7e-3
+  weight_decay: 1.0e-7
+  epochs: 5
+  mpnn_train_rounds: 20
+  mpnn_eval_rounds: 50
+  val_interval: 1
+
+data:
+  dir: datasets/picross_10x10
+  train_split: train
+  val_splits: [test_easy, test_hard]
+  loader: puzzle
+
+task_cfg:
+  clue_encoding: onehot
+
+model:
+  num_classes: 2
+  num_slots: 10
+  num_cells: 100
+  slot_input_dim: 55
+  d_v: 320                # = picross_sheaf d_v (communication matching)
+  d_e: 32
+  encoder_arch: sudoku
+  enc_d_model: 128
+  enc_num_blocks: 2
+  comm_norm_type: layernorm
+  decoder_arch: sudoku
+  dec_hidden_dims: [256]
+  mpnn_message_dim: 32    # = picross_sheaf d_e
+  mpnn_aggregation: max
+  mpnn_edge_type_mode: slot
+  num_directions: 10
+  mpnn_graph_readout: per_node

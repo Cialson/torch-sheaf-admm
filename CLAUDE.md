@@ -59,7 +59,7 @@ uv run python scripts/train.py +experiment=picross_mpnn              # ~3 min/ep
 
 Experiments: `maze_sheaf`, `maze_mpnn`, `mnist_sheaf`, `mnist_mpnn`, `sudoku_sheaf`,
 `sudoku_sheaf_lora`, `sudoku_mpnn` (paper), plus the local `life_sheaf`, `life_mpnn`,
-`picross_sheaf`, `picross_mpnn`.
+`picross_sheaf`, `picross_mpnn` (param-matched), `picross_mpnn_comm` (comm-matched).
 Paper seeds: `training.seed=42|123|456`. W&B is off by default
 (`wandb.mode=online` to enable). Outputs (`checkpoint.pt`, `history.json`) go to Hydra's
 `outputs/<date>/<time>/`.
@@ -246,3 +246,75 @@ global coordination the paper targets.
 Next: (A) Sheaf with `training.train_iters_dist=fixed` (same K training as MPNN); (B) Sheaf with
 `training.K_train=40 training.train_iters_min=15 training.K_eval=40` for stability beyond 20;
 seeds 123/456 for both; a less local task (`build_life --steps 3`).
+
+### Picross 10x10 (local task): `picross_sheaf` vs `picross_mpnn`
+
+Data: `build_picross` keeps the unique-solution boards of NonoDataset 10x10 (CC BY 4.0): `train`
+274,361 (icons + noise/shapes, 64 % filled), `test_easy` 8,847 (icons, solved by line logic alone),
+`test_hard` 501 (icons, unique but need search, 32 % filled). Agents: 10 rows + 10 columns on
+K(10,10), one edge per cell. Trivial "all empty": `cell_acc` 52.0 / 67.8 %, `solved` 0 %
+(easy / hard), so read `solved` / `line_ok`, not `cell_acc`, on `test_hard`.
+
+Runs (seed 42, 5 epochs = 10.7k steps, batch 128, shipped configs, parameter-matched):
+- MPNN `outputs/2026-11-13/17-34-30/` (613K params, lr 3e-4, 20/50 rounds): 16 min.
+- Sheaf `outputs/2026-11-13/17-50-32/` (597K params, lr 1.7e-3, K 20/50): 63 min, 6.2 GiB.
+
+`solved` (%), EMA weights:
+
+| epoch | Sheaf easy | MPNN easy | Sheaf hard | MPNN hard |
+|---|---|---|---|---|
+| 0 | 79.8 | 20.4 | 17.9 | 0.0 |
+| 1 | 93.0 | 43.1 | 36.7 | 1.2 |
+| 2 | 95.3 | 58.1 | 40.1 | 3.6 |
+| 3 | 95.9 | 64.7 | 45.0 | 5.6 |
+| 4 | **96.4** | 64.4 | **46.4** | 5.2 |
+
+Epoch 4 `line_ok` (fraction of satisfied line clues): Sheaf 99.5 / 85.7, MPNN 92.4 / 60.6.
+
+These are the numbers `train.py` prints, i.e. MPNN evaluated at 50 rounds, beyond its trained 20,
+where it degrades: they overstate the gap. Fair comparison below.
+
+MPNN with the Sheaf lr (`training.lr=1.7e-3`): `outputs/2026-11-13/18-58-34/` (16 min); at 50
+rounds 87.4 / 31.5 % (easy / hard) at epoch 4.
+
+Communication-matched MPNN (`picross_mpnn_comm`: same d_v 320 and message size 32 as the Sheaf
+stalks, hence 1.45M params = 2.4x, lr 1.7e-3): `outputs/2026-11-13/19-42-00/` (22 min); at 50
+rounds 97.2 / 66.8 % at epoch 4. The param-matched MPNN has half the Sheaf's per-cell state
+(d_v 160 = 16 per cell vs 32).
+
+`scripts/analyze_picross.py` (board by board, all K; outputs in `outputs/analysis_picross/`),
+`solved` (%) vs K at eval (all three trained at K = 20, fixed):
+
+| K | 1 | 3 | 5 | 10 | 15 | 20 | 30 | 50 | 100 |
+|---|---|---|---|---|---|---|---|---|---|
+| Sheaf easy | 5.3 | 25.2 | 45.7 | 74.4 | 88.5 | **94.6** | 96.2 | **96.4** | 96.0 |
+| MPNN comm easy | 0.8 | 5.0 | 6.7 | 49.6 | 89.5 | 95.2 | 96.7 | **97.2** | 97.1 |
+| MPNN lr 1.7e-3 easy | 1.0 | 1.8 | 2.5 | 18.3 | 81.0 | 88.3 | **89.1** | 87.4 | 82.4 |
+| MPNN lr 3e-4 easy | 0.8 | 4.7 | 11.5 | 49.0 | 80.5 | **87.0** | 81.4 | 64.3 | 51.1 |
+| Sheaf hard | 0 | 0 | 1.0 | 14.4 | 30.9 | 44.7 | 44.5 | **46.5** | 45.5 |
+| MPNN comm hard | 0 | 0 | 0 | 1.0 | 32.3 | 49.1 | 60.7 | 66.7 | **68.5** |
+| MPNN lr 1.7e-3 hard | 0 | 0 | 0 | 0.4 | 20.8 | **37.1** | 37.1 | 31.5 | 20.4 |
+| MPNN lr 3e-4 hard | 0 | 0 | 0 | 1.4 | 24.0 | **32.1** | 20.6 | 5.2 | 2.6 |
+
+Takeaways:
+- Param-matched (597K vs 613K, same lr), Sheaf wins: at K = 20, 94.6 vs 88.3 (easy), 44.7 vs
+  37.1 (hard); the gap grows with board depth (easy boards with 11+ line-logic rounds: 48 vs 29).
+  Most of the gap first printed by `train.py` came from the MPNN lr and from evaluating it at 50.
+- Communication-matched (same state size, MPNN 2.4x params), the MPNN wins: about equal on easy
+  (95.2 vs 94.6 at K = 20, 97.2 vs 96.4 at K = 50) and clearly better on hard (49.1 vs 44.7 at
+  K = 20, 66.7 vs 46.5 at K = 50). Same ordering as the paper's Sudoku table (param < comm).
+- Stability beyond the trained K is not Sheaf-specific: the comm MPNN is stable too and keeps
+  improving on `test_hard` up to K = 100 (68.5 %); only the small (param-matched) MPNNs degrade
+  (9 % / 42 % of solved boards lost at K = 100). Sheaf plateaus at ~46 % on hard.
+- What stays Sheaf-specific is the *anytime* behaviour: its iterations act like propagation
+  rounds (median smallest solving K about 1-2x the board's line-logic rounds: 1->1, 2->2, 3->5,
+  4->7, 5->10), so it is already useful at small K (K = 5: 45.7 % easy vs <= 11.5 % for all
+  MPNNs); every MPNN needs >= 10-15 rounds even for 2-round boards.
+- On `test_hard`, from K ~ 7 on, almost all remaining Sheaf errors lie in the cells where line
+  logic stalls; it then resolves them (or not: failures are boards with large stall zones).
+
+Caveats: one seed; 5 epochs; hyperparameters are Sudoku's; train/test distributions differ
+(noise boards only in train); no Sheaf variant with more capacity was tried.
+
+Next: seeds 123/456 for Sheaf, MPNN param and MPNN comm; a larger Sheaf (e.g. enc_d_model or
+dec_hidden_dims up to ~1.45M params) to separate capacity from architecture; longer training.

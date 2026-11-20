@@ -103,6 +103,7 @@ def test_direction_kernel_flax_xavier_scale():
         ("sudoku_sheaf_lora", 2029233),
         ("picross_sheaf", 596791),
         ("picross_mpnn", 613063),  # parameter-matched to picross_sheaf
+        ("picross_mpnn_comm", 1449911),  # communication-matched (same d_v / message size)
     ],
 )
 def test_locked_parameter_budgets(name, expected):
@@ -139,6 +140,7 @@ def test_maze_compute_matched_mpnn_budget():
         "sudoku_mpnn",
         "picross_sheaf",
         "picross_mpnn",
+        "picross_mpnn_comm",
     ],
 )
 def test_all_shipped_configs_forward(name):

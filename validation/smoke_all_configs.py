@@ -33,6 +33,7 @@ EXPERIMENTS = (
     "sudoku_mpnn",
     "picross_sheaf",
     "picross_mpnn",
+    "picross_mpnn_comm",
 )
 
 

@@ -80,6 +80,7 @@ def main() -> None:
         "--num-iters", type=int, default=30, help="ADMM steps for the trajectory artifacts"
     )
     p.add_argument("--batch-index", type=int, default=0, help="example index within the batch")
+    p.add_argument("--format", choices=("pdf", "png"), default="pdf", help="figure file format")
     p.add_argument(
         "--ks", type=int, nargs="+", default=None, help="ADMM counts for prediction evolution"
     )
@@ -138,7 +139,7 @@ def main() -> None:
             targets,
             aux,
             ks,
-            str(out_dir / "prediction_evolution.pdf"),
+            str(out_dir / f"prediction_evolution.{args.format}"),
             batch_index=args.batch_index,
             title=f"{task_name}: prediction vs k",
         )
@@ -156,14 +157,14 @@ def main() -> None:
     written.append(
         plot_coordination_dynamics(
             traj,
-            str(out_dir / "coordination_dynamics.pdf"),
+            str(out_dir / f"coordination_dynamics.{args.format}"),
             title=f"{task_name}: coordination dynamics (rho={traj.rho:.3g})",
         )
     )
     written.append(
         plot_xz_trajectories(
             traj,
-            str(out_dir / "xz_trajectories.pdf"),
+            str(out_dir / f"xz_trajectories.{args.format}"),
             title=f"{task_name}: x vs z trajectories",
         )
     )
