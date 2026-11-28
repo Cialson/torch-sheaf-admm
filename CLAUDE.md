@@ -318,3 +318,67 @@ Caveats: one seed; 5 epochs; hyperparameters are Sudoku's; train/test distributi
 
 Next: seeds 123/456 for Sheaf, MPNN param and MPNN comm; a larger Sheaf (e.g. enc_d_model or
 dec_hidden_dims up to ~1.45M params) to separate capacity from architecture; longer training.
+
+#### Learning-rate sweep (2026-11-27): `outputs/lr_sweep/` (`scripts/sweep_lr.py`)
+
+`build_picross` now also holds out `val_easy` (4,000) / `val_hard` (1,000) from the unique train
+boards (train 274,361 -> 269,361; test splits unchanged; the runs above used the old train, which
+contains the val boards). Sweep: 1 epoch, eval at K = 20 on the val splits only, `ema_decay` 0.995
+(0.999 leaves ~12 % init after 2.1k steps), seed 42. `solved` % (val_easy / val_hard):
+
+| model | 3e-4 | 1e-3 | 1.7e-3 | 3e-3 | 5e-3 | 8e-3 |
+|---|---|---|---|---|---|---|
+| MPNN param | 45.3 / 1.4 | 71.5 / 5.9 | **74.6 / 7.2** | 73.5 / 5.6 | | |
+| MPNN comm | 79.5 / 9.5 | **82.2 / 11.7** | 74.5 / 6.2 | 71.0 / 4.1 | | |
+| Sheaf | 68.1 / 4.8 | 85.8 / 14.6 | 88.2 / 16.7 | **90.0 / 19.2** | 90.6 / 19.5 | 91.1 / 20.0 |
+
+Chosen lr: MPNN param 1.7e-3 (unchanged), MPNN comm 1e-3 (was 1.7e-3), Sheaf 3e-3 (was 1.7e-3):
+Sheaf plateaus from 3e-3 to 8e-3 (within ~1 point, i.e. within noise on 1,000 hard boards), and
+one epoch favours high lr, so the lowest lr of the plateau is safer for long constant-lr runs.
+After one epoch at its best lr, Sheaf leads on val; over 5 epochs the comm MPNN finished ahead on
+test, so the long runs decide.
+
+- Gotcha: Windows sleep suspends WSL training (the run resumes, its wall time counts the sleep)
+  or kills it when the session ends; `sweep_lr.py` skips finished runs, so just relaunch it.
+
+#### 10 epochs with the tuned lr (2026-11-27): `outputs/long10/` (`outputs/long10_runs.sh`)
+
+Seed 42, 10 epochs (~21k steps), new train split, eval per epoch at K = 20 on val and test. Wall
+time: MPNN param ~30 min, MPNN comm ~45 min, Sheaf ~2h05. `scripts/analyze_picross.py` output in
+`outputs/analysis_picross_long10/`. `solved` (%) vs K at eval (all trained at K = 20):
+
+| K | 1 | 3 | 5 | 7 | 10 | 15 | 20 | 30 | 50 | 100 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Sheaf (lr 3e-3) easy | 6.2 | 25.3 | **49.0** | **61.7** | 75.7 | 90.2 | 96.1 | 97.0 | 91.7 | 92.1 |
+| MPNN comm (lr 1e-3) easy | 0.1 | 3.4 | 12.4 | 24.8 | 75.4 | 95.8 | **98.6** | 99.3 | 99.5 | 99.5 |
+| MPNN param (lr 1.7e-3) easy | 0.3 | 3.2 | 12.4 | 15.2 | 45.8 | 90.5 | 96.1 | 97.4 | 97.5 | 97.2 |
+| Sheaf hard | 0 | 0.2 | 0.8 | 4.4 | 14.4 | 30.9 | 47.9 | 46.9 | 31.5 | 34.5 |
+| MPNN comm hard | 0 | 0 | 0 | 0 | 13.2 | 52.7 | **70.1** | 82.2 | 87.2 | **89.4** |
+| MPNN param hard | 0 | 0 | 0 | 0 | 1.8 | 34.3 | 54.9 | 64.3 | 66.5 | 64.7 |
+
+Per epoch (`test_hard` at K = 20): Sheaf 26.8, 37.5, 41.2, 43.0, 44.6, 44.2, 45.2, 47.2, 45.8,
+47.8 (plateau from epoch ~4, train loss still falling to 0.004); MPNN param 1.4 -> 54.8 and MPNN
+comm 5.5 -> 70.0, both still rising at epoch 9 (comm slowing).
+
+Takeaways (supersede the 5-epoch ones above):
+- With a tuned lr and 10 epochs, both MPNNs beat Sheaf on `test_hard`, the param-matched one
+  included (54.9 vs 47.9 at K = 20; 66.5 vs 31.5 at K = 50). On `test_easy` at K = 20, Sheaf ties
+  the param-matched MPNN (96.1) and trails the comm-matched one (98.6). The 5-epoch "Sheaf wins
+  param-matched" result was an artifact of under-training the MPNN (and of its lr).
+- Sheaf learns fastest (26.8 % hard after one epoch vs 1.4 / 5.5 %) but hits a ceiling on hard
+  boards (~45-48 %) while its train loss keeps falling: a generalization limit, not lack of
+  training. Hard-board depth does not explain it (Sheaf is below the MPNNs in every depth bin).
+- Stability beyond the trained K flipped: the 10-epoch MPNNs keep improving up to K = 50-100
+  (comm hard 70.1 -> 89.4), while Sheaf at lr 3e-3 degrades beyond K = 30 (hard 47.9 -> 31.5,
+  easy 96.1 -> 91.7; 5.7 % of easy boards solved at some K are lost at K = 100). The 5-epoch
+  Sheaf at lr 1.7e-3 was stable, so the higher lr may be the cause (untested).
+- What remains Sheaf-specific is the anytime behaviour: at K <= 7 it is far ahead (easy K = 5:
+  49.0 vs 12.4 %); its median solving K still follows the line-logic rounds (1->1, 2->2, 3->5,
+  4->7, 5->10) while the MPNNs need >= 7-10 rounds even for 2-round boards.
+
+Caveats: one seed (val_hard and test_hard have 1,000 / 501 boards, i.e. a few points of noise);
+lr chosen on 1-epoch runs; Sheaf hyperparameters other than lr (gamma, rho_init, cg_iters, d_e)
+are Sudoku's and untuned; no Sheaf of 1.45M params.
+
+Next: seeds 123/456 on these configs; Sheaf at lr 1.7e-3 for 10 epochs (stability beyond K);
+Sheaf with uniform K sampling (`train_iters_dist=uniform`) or K_train 30; a larger Sheaf.

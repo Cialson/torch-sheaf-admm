@@ -12,8 +12,10 @@ solutions, and some test boards also appear in train, so the builder:
 2. recomputes the clues from each solution and checks they match the source clues;
 3. removes duplicate clue sets inside train, and test boards whose clues appear in train;
 4. counts solutions (up to 2) with :mod:`sheaf_admm.data.picross` and drops non-unique boards;
-5. writes ``train`` (all unique source-train boards), ``test_easy`` (unique source-test boards
-   solved by line logic alone) and ``test_hard`` (unique, but needing search).
+5. writes ``train`` (the unique source-train boards, minus the validation ones), ``val_easy`` /
+   ``val_hard`` (4,000 / 1,000 unique source-train boards held out, solved by line logic alone /
+   needing search; for model selection such as the learning rate), ``test_easy`` (unique
+   source-test boards solved by line logic alone) and ``test_hard`` (unique, needing search).
 
 On-disk format is the puzzle layout (``seq_len = 100``): inputs are the packed clues
 ``[20 lines (10 rows, then 10 columns), 5 slots]`` right-aligned, values 0-10 (0 = padding);
@@ -58,6 +60,10 @@ class PicrossConfig:
     output_dir: Path = Path("datasets/picross_10x10")
     raw_dir: Path | None = None  # default: <output_dir>/raw
     train_limit: int | None = None  # cap source-train boards (debugging)
+    # validation boards held out of the unique train boards, by difficulty (for model selection,
+    # e.g. the learning rate; the test splits stay untouched). Each is capped at half its pool.
+    val_easy_size: int = 4000
+    val_hard_size: int = 1000
     workers: int = max(1, (os.cpu_count() or 2) - 1)
     seed: int = 0
 
@@ -212,21 +218,26 @@ def build_from_arrays(
         unique = a["num_solutions"] == 1
         stats[f"{name}_multi_solution"] = int((a["num_solutions"] >= 2).sum())
         stats[f"{name}_unsat"] = int((a["num_solutions"] == 0).sum())
+        easy = np.flatnonzero(unique & a["line_solvable"])
+        hard = np.flatnonzero(unique & ~a["line_solvable"])
         if name == "train":
-            splits = {"train": unique}
-        else:
+            easy, hard = rng.permutation(easy), rng.permutation(hard)
+            n_easy = min(cfg.val_easy_size, len(easy) // 2)
+            n_hard = min(cfg.val_hard_size, len(hard) // 2)
+            if (n_easy, n_hard) != (cfg.val_easy_size, cfg.val_hard_size):
+                print(f"[warn] val capped to {n_easy} easy / {n_hard} hard boards")
             splits = {
-                "test_easy": unique & a["line_solvable"],
-                "test_hard": unique & ~a["line_solvable"],
+                "train": rng.permutation(np.concatenate([easy[n_easy:], hard[n_hard:]])),
+                "val_easy": easy[:n_easy],
+                "val_hard": hard[:n_hard],
             }
-        for split, mask in splits.items():
-            idx = np.flatnonzero(mask)
+        else:
+            splits = {"test_easy": easy, "test_hard": hard}
+        for split, idx in splits.items():
             if len(idx) == 0:
                 print(f"[warn] {split} is empty; not written")
                 stats[split] = {"size": 0}
                 continue
-            if split == "train":
-                idx = rng.permutation(idx)
             write_split(
                 cfg.output_dir / split,
                 x[idx],
@@ -265,6 +276,8 @@ def parse_args() -> PicrossConfig:
     p.add_argument("--output-dir", type=Path, default=PicrossConfig.output_dir)
     p.add_argument("--raw-dir", type=Path, default=None)
     p.add_argument("--train-limit", type=int, default=None)
+    p.add_argument("--val-easy-size", type=int, default=PicrossConfig.val_easy_size)
+    p.add_argument("--val-hard-size", type=int, default=PicrossConfig.val_hard_size)
     p.add_argument("--workers", type=int, default=PicrossConfig.workers)
     p.add_argument("--seed", type=int, default=PicrossConfig.seed)
     a = p.parse_args()
@@ -272,6 +285,8 @@ def parse_args() -> PicrossConfig:
         output_dir=a.output_dir,
         raw_dir=a.raw_dir,
         train_limit=a.train_limit,
+        val_easy_size=a.val_easy_size,
+        val_hard_size=a.val_hard_size,
         workers=a.workers,
         seed=a.seed,
     )

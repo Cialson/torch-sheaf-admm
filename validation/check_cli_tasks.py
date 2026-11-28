@@ -47,7 +47,7 @@ def _picross_data(path: Path) -> None:
     rng = np.random.default_rng(13)
     labels = (rng.random((200, 100)) < 0.6).astype(np.uint8)
     inputs = np.stack([pack_clues(grid_clues(g.reshape(10, 10)), 10).reshape(-1) for g in labels])
-    cfg = PicrossConfig(output_dir=path, workers=1)
+    cfg = PicrossConfig(output_dir=path, workers=1, val_easy_size=4, val_hard_size=0)
     build_from_arrays(cfg, inputs[:100], labels[:100], inputs[100:], labels[100:])
 
 

@@ -117,15 +117,18 @@ def test_build_from_arrays_writes_clean_disjoint_splits(tmp_path):
     x_tr, y_tr = np.concatenate([x[:200], x[:10]]), np.concatenate([y[:200], y[:10]])
     x_te, y_te = np.concatenate([x[200:], x[:5]]), np.concatenate([y[200:], y[:5]])
 
-    cfg = PicrossConfig(size=n, output_dir=tmp_path, workers=1)
+    cfg = PicrossConfig(size=n, output_dir=tmp_path, workers=1, val_easy_size=20, val_hard_size=1)
     stats = build_from_arrays(cfg, x_tr, y_tr, x_te, y_te)
+    assert stats["val_easy"]["size"] == 20
+    assert stats["val_hard"]["size"] in (0, 1)  # capped at half the (small) hard pool
     assert stats["train_duplicates"] == 10
     assert stats["test_in_train"] == 5
     assert stats["test_multi_solution"] > 0
     assert stats["test_hard"]["size"] > 0 and stats["test_easy"]["size"] > 0
 
     seen = {}
-    for split in ("train", "test_easy", "test_hard"):
+    splits = ("train", "val_easy", "val_hard", "test_easy", "test_hard")
+    for split in (s for s in splits if stats[s]["size"]):
         ds = PuzzleDataset(tmp_path, split)
         s = ds.sets["all"]
         assert s.inputs.shape[1] == n * n and s.labels.shape[1] == n * n
@@ -137,11 +140,17 @@ def test_build_from_arrays_writes_clean_disjoint_splits(tmp_path):
             np.testing.assert_array_equal(res.solution.reshape(-1), yi)
         seen[split] = {r.tobytes() for r in s.inputs}
         solvable = np.load(tmp_path / split / "all__line_solvable.npy")
-        if split == "test_easy":
+        if split.endswith("_easy"):
             assert solvable.all()
-        elif split == "test_hard":
+        elif split.endswith("_hard"):
             assert not solvable.any()
-    assert not (seen["train"] & (seen["test_easy"] | seen["test_hard"]))
+    names = list(seen)
+    for i, a in enumerate(names):  # all splits pairwise disjoint
+        for b in names[i + 1 :]:
+            assert not (seen[a] & seen[b]), (a, b)
+    unique_train = 200 - stats["train_multi_solution"] - stats["train_unsat"]
+    held_out = stats["val_easy"]["size"] + stats["val_hard"]["size"]
+    assert stats["train"]["size"] + held_out == unique_train
     assert json.loads((tmp_path / "stats.json").read_text())["train"]["size"] == len(seen["train"])
 
 
